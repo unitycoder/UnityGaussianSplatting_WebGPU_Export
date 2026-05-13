@@ -2,6 +2,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Mathematics;
@@ -759,7 +762,121 @@ namespace GaussianSplatting.Runtime
                 GaussianSplatRenderSystem.instance.UpdateSplatAssetData(this);
             }
         }
-// Draw octree leaf bounds in the Scene view for debugging. Call is automatic via OnDrawGizmos.
+
+        [ContextMenu("Export Points To XYZ")]
+        public void ExportPointsToCsv()
+        {
+            var fileName = $"{name}_points_{DateTime.Now:yyyyMMdd_HHmmss}.xyz";
+            var filePath = Path.Combine(Application.streamingAssetsPath, fileName);
+            ExportPointsToCsv(filePath);
+        }
+
+        public void ExportPointsToCsv(string filePath)
+        {
+            if (!HasValidAsset)
+            {
+                Debug.LogWarning($"Cannot export points for {name}: invalid or missing asset.");
+                return;
+            }
+
+            NativeArray<float3> localPositions = ExtractSplatPositions();
+            if (!localPositions.IsCreated || localPositions.Length == 0)
+            {
+                Debug.LogWarning($"Cannot export points for {name}: no positions extracted.");
+                return;
+            }
+
+            try
+            {
+                var directory = Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    Directory.CreateDirectory(directory);
+
+                var sb = new StringBuilder(localPositions.Length * 48 + 16);
+
+                var tr = transform;
+                for (int i = 0; i < localPositions.Length; i++)
+                {
+                    var p = localPositions[i];
+                    var wp = tr.TransformPoint(new Vector3(p.x, p.y, p.z));
+                    sb.Append(wp.x.ToString(CultureInfo.InvariantCulture));
+                    sb.Append(' ');
+                    sb.Append(wp.y.ToString(CultureInfo.InvariantCulture));
+                    sb.Append(' ');
+                    sb.Append(wp.z.ToString(CultureInfo.InvariantCulture));
+                    sb.AppendLine();
+                }
+
+                File.WriteAllText(filePath, sb.ToString(), Encoding.UTF8);
+                Debug.Log($"Exported {localPositions.Length} points to: {filePath}");
+            }
+            finally
+            {
+                localPositions.Dispose();
+            }
+        }
+
+        [ContextMenu("Export All Loaded Points To XYZ")]
+        public void ExportAllLoadedPointsToCsv()
+        {
+            var fileName = $"all_loaded_points_{DateTime.Now:yyyyMMdd_HHmmss}.xyz";
+            var filePath = Path.Combine(Application.persistentDataPath, fileName);
+            ExportAllLoadedPointsToCsv(filePath);
+        }
+
+        public static void ExportAllLoadedPointsToCsv(string filePath)
+        {
+            var renderers = FindObjectsByType<GaussianSplatRenderer>(FindObjectsInactive.Exclude, FindObjectsSortMode.None);
+            if (renderers == null || renderers.Length == 0)
+            {
+                Debug.LogWarning("No active GaussianSplatRenderer instances found to export.");
+                return;
+            }
+
+            var directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                Directory.CreateDirectory(directory);
+
+            var sb = new StringBuilder();
+            int totalCount = 0;
+
+            foreach (var renderer in renderers)
+            {
+                if (renderer == null || !renderer.isActiveAndEnabled || !renderer.HasValidAsset)
+                    continue;
+
+                NativeArray<float3> localPositions = renderer.ExtractSplatPositions();
+                if (!localPositions.IsCreated || localPositions.Length == 0)
+                    continue;
+
+                try
+                {
+                    var tr = renderer.transform;
+                    for (int i = 0; i < localPositions.Length; i++)
+                    {
+                        var p = localPositions[i];
+                        var wp = tr.TransformPoint(new Vector3(p.x, p.y, p.z));
+                        sb.Append(wp.x.ToString(CultureInfo.InvariantCulture));
+                        sb.Append(' ');
+                        sb.Append(wp.y.ToString(CultureInfo.InvariantCulture));
+                        sb.Append(' ');
+                        sb.Append(wp.z.ToString(CultureInfo.InvariantCulture));
+                        sb.AppendLine();
+                    }
+
+                    totalCount += localPositions.Length;
+                }
+                finally
+                {
+                    localPositions.Dispose();
+                }
+            }
+
+            File.WriteAllText(filePath, sb.ToString(), Encoding.UTF8);
+            Debug.Log($"Exported {totalCount} total points from loaded renderers to: {filePath}");
+        }
+
+        // Draw octree leaf bounds in the Scene view for debugging. Call is automatic via OnDrawGizmos.
         public void OnDrawGizmos()
         {
             if (!m_OctreeBuilt || m_Octree == null)
