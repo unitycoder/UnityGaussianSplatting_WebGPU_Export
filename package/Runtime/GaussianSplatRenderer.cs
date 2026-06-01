@@ -766,7 +766,7 @@ namespace GaussianSplatting.Runtime
         [ContextMenu("Export Points To XYZ")]
         public void ExportPointsToCsv()
         {
-            var fileName = $"{name}_points_{DateTime.Now:yyyyMMdd_HHmmss}.xyz";
+            var fileName = $"{name}_points_{DateTime.Now:ddMMyyyy_HHmmss}.xyz";
             var filePath = Path.Combine(Application.streamingAssetsPath, fileName);
             ExportPointsToCsv(filePath);
         }

@@ -19,6 +19,9 @@ namespace GaussianSplatting.Runtime
         [SerializeField] bool m_OverrideResolution = false;
         [SerializeField] int m_MaxSize = 1280;
 
+        [Header("Camera Filtering")]
+        [SerializeField] bool m_RenderOnlyMainCamera = false;
+
         class GSRenderPass : ScriptableRenderPass
         {
             const string GaussianSplatRTName = "_GaussianSplatRT";
@@ -166,8 +169,13 @@ namespace GaussianSplatting.Runtime
         public override void OnCameraPreCull(ScriptableRenderer renderer, in CameraData cameraData)
         {
             m_HasCamera = false;
+
+            var camera = cameraData.camera;
+            if (m_RenderOnlyMainCamera && (camera == null || camera.tag != "MainCamera"))
+                return;
+
             var system = GaussianSplatRenderSystem.instance;
-            if (!system.GatherSplatsForCamera(cameraData.camera))
+            if (!system.GatherSplatsForCamera(camera))
                 return;
 
             m_HasCamera = true;
