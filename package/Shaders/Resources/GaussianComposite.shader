@@ -4,8 +4,11 @@ Shader "Hidden/Gaussian Splatting/Composite"
 CGINCLUDE
 #pragma vertex vert
 #pragma fragment frag
+#pragma target 3.5
+#pragma multi_compile _ GS_XR_ARRAY
 
 #include "UnityCG.cginc"
+#include "GaussianScreenTextures.hlsl"
 
 struct v2f
 {
@@ -36,12 +39,12 @@ ENDCG
             Blend SrcAlpha OneMinusSrcAlpha
 
 CGPROGRAM
-Texture2D _GaussianSplatRT;
+GS_SCREEN_TEXTURE _GaussianSplatRT;
 SamplerState sampler_GaussianSplatRT;
 half4 frag (v2f i) : SV_Target
 {
     // Use UV sampling (correct for fullscreen quad). If the RT is sRGB, Unity will decode automatically.
-    half4 col = _GaussianSplatRT.Sample(sampler_GaussianSplatRT, i.uv);
+    half4 col = _GaussianSplatRT.Sample(sampler_GaussianSplatRT, GS_SCREEN_UV(i.uv));
     // If your RT is NOT marked sRGB, then decode manually:
     col.rgb = GammaToLinearSpace(col.rgb);
     //col.a = saturate(col.a * 1.5);
@@ -64,7 +67,13 @@ CGPROGRAM
 
 half4 frag (v2f i) : SV_Target
 {
+#ifdef GS_XR_ARRAY
+    // Use the splat's own motion. The scene depth texture can be 2D in XR
+    // multipass and describes scene geometry rather than these splats.
+    return DoTemporalAA(i.uv, 2, 0, 2);
+#else
     return DoTemporalAA(i.uv, 2, 2, 2);
+#endif
 }
 ENDCG
         }

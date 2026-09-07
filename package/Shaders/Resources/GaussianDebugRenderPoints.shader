@@ -17,7 +17,7 @@ CGPROGRAM
 #pragma use_dxc
 
 #include "GaussianSplatting.hlsl"
-#include "UnityCG.cginc"
+#include "GaussianStereo.hlsl"
 
 struct v2f
 {
@@ -47,7 +47,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     float3 centerWorldPos = splat.pos;
     centerWorldPos = mul(unity_ObjectToWorld, float4(centerWorldPos,1)).xyz;
 
-    float4 centerClipPos = mul(UNITY_MATRIX_VP, float4(centerWorldPos, 1));
+    float4 centerClipPos = SplatWorldToClip(centerWorldPos);
 
     o.vertex = centerClipPos;
 	uint idx = vtxID;
@@ -62,7 +62,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
         o.color.b = (float)splatIndex / (float)_SplatCount;
     }
 
-    FlipProjectionIfBackbuffer(o.vertex);
+    if (!_SplatStereoEnabled) FlipProjectionIfBackbuffer(o.vertex);
     return o;
 }
 

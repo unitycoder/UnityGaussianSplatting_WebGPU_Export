@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -22,8 +23,72 @@ namespace GaussianSplatting.Runtime
         RenderTexture m_AccumulationTexture;
         RenderTexture m_TempTexture;
 
+        sealed class XREyeHistory
+        {
+            internal RenderTexture read, write;
+            internal int frame = -1;
+        }
+        readonly Dictionary<(Camera, int), XREyeHistory> m_XRHistory = new();
+
+        // Keep XR textures and each eye's history separate from the legacy 2D filter.
+        internal void RenderXREye(CommandBuffer cmd, Camera camera, int eye, Material material,
+            RenderTargetIdentifier source, RenderTargetIdentifier destination, RenderTargetIdentifier motion,
+            RenderTextureDescriptor descriptor, Rect viewport, float influence, float variance)
+        {
+            var key = (camera, eye);
+            if (!m_XRHistory.TryGetValue(key, out var history))
+                m_XRHistory.Add(key, history = new XREyeHistory());
+            descriptor.msaaSamples = 1;
+            descriptor.bindMS = false;
+            descriptor.depthBufferBits = 0;
+            descriptor.useMipMap = false;
+            descriptor.autoGenerateMips = false;
+            descriptor.useDynamicScale = false;
+            descriptor.memoryless = RenderTextureMemoryless.None;
+            bool reset = history.read == null || history.read.width != descriptor.width || history.read.height != descriptor.height;
+            if (reset)
+            {
+                Object.DestroyImmediate(history.read);
+                Object.DestroyImmediate(history.write);
+                history.read = new RenderTexture(descriptor) { name = "Gaussian XR History " + eye };
+                history.write = new RenderTexture(descriptor) { name = "Gaussian XR Filter " + eye };
+                history.read.Create();
+                history.write.Create();
+            }
+            if (reset || history.frame != Time.frameCount - 1)
+                influence = 1;
+            var texelSize = new Vector4(1f / descriptor.width, 1f / descriptor.height, descriptor.width, descriptor.height);
+            var properties = new MaterialPropertyBlock();
+            properties.SetFloat(Props._TaaFrameInfluence, influence);
+            properties.SetFloat(Props._TaaVarianceClampScale, variance);
+            properties.SetTexture(Props._TaaAccumulationTex, history.read);
+            properties.SetVector("_TaaAccumulationTex_TexelSize", texelSize);
+            properties.SetVector("_TaaMotionVectorTex_TexelSize", texelSize);
+            properties.SetVector("_GaussianSplatRT_TexelSize", texelSize);
+            cmd.SetGlobalTexture(GaussianSplatRenderer.Props.GaussianSplatRT, source);
+            cmd.SetGlobalTexture(Props._TaaMotionVectorTex, motion);
+            cmd.SetRenderTarget(history.write, 0, CubemapFace.Unknown, eye);
+            cmd.SetViewport(viewport);
+            cmd.DrawProcedural(Matrix4x4.identity, material, 1, MeshTopology.Triangles, 3, 1, properties);
+
+            // Composite directly from the filtered array slice; no cmd.Blit or copy
+            // that can change URP's stereo keywords or mix eye histories.
+            cmd.SetGlobalTexture(GaussianSplatRenderer.Props.GaussianSplatRT, history.write);
+            cmd.SetRenderTarget(destination);
+            cmd.SetViewport(viewport);
+            cmd.DrawProcedural(Matrix4x4.identity, material, 0, MeshTopology.Triangles, 3, 1);
+            (history.read, history.write) = (history.write, history.read);
+            history.frame = Time.frameCount;
+        }
+
         public void Dispose()
         {
+            foreach (var history in m_XRHistory.Values)
+            {
+                Object.DestroyImmediate(history.read);
+                Object.DestroyImmediate(history.write);
+            }
+            m_XRHistory.Clear();
             Object.DestroyImmediate(m_AccumulationTexture); m_AccumulationTexture = null;
             Object.DestroyImmediate(m_TempTexture); m_TempTexture = null;
             m_CurWidth = -1;

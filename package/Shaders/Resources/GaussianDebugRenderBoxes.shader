@@ -17,7 +17,7 @@ CGPROGRAM
 #pragma require compute
 #pragma use_dxc
 
-#include "UnityCG.cginc"
+#include "GaussianStereo.hlsl"
 #include "GaussianSplatting.hlsl"
 
 StructuredBuffer<uint> _OrderBuffer;
@@ -86,8 +86,8 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     }
 
     float3 worldPos = centerWorldPos + localPos;
-    o.vertex = UnityWorldToClipPos(worldPos);
-    FlipProjectionIfBackbuffer(o.vertex);
+    o.vertex = SplatWorldToClip(worldPos);
+    if (!_SplatStereoEnabled) FlipProjectionIfBackbuffer(o.vertex);
     return o;
 }
 

@@ -5,6 +5,7 @@
 // just a stupid accumulation buffer type of thing.
 
 #include "HLSLSupport.cginc"
+#include "GaussianScreenTextures.hlsl"
 
 #ifndef TAA_YCOCG
 #define TAA_YCOCG 1
@@ -45,11 +46,11 @@ half3 YCoCgToRGB(half3 YCoCg)
 
 half Max3(half a, half b, half c) { return max(max(a, b), c); }
 
-Texture2D _CameraDepthTexture;
-Texture2D _GaussianSplatRT;
+GS_SCREEN_TEXTURE _CameraDepthTexture;
+GS_SCREEN_TEXTURE _GaussianSplatRT;
 float4 _GaussianSplatRT_TexelSize;
-Texture2D _TaaMotionVectorTex; // RG motion (alpha-weighted NDC delta from previous to current)
-Texture2D _TaaAccumulationTex;
+GS_SCREEN_TEXTURE _TaaMotionVectorTex; // RG motion (alpha-weighted NDC delta from previous to current)
+GS_SCREEN_TEXTURE _TaaAccumulationTex;
 
 cbuffer TemporalAAData {
     float4 _TaaMotionVectorTex_TexelSize;   // (1/w, 1/h, w, h)
@@ -63,7 +64,7 @@ SamplerState sampler_LinearClamp, sampler_PointClamp;
 // Per-pixel camera backwards velocity
 half2 GetVelocityWithOffset(float2 uv, half2 depthOffsetUv)
 {
-    half2 mv = _TaaMotionVectorTex.Sample(sampler_LinearClamp, uv + _TaaMotionVectorTex_TexelSize.xy * depthOffsetUv).xy;
+    half2 mv = _TaaMotionVectorTex.Sample(sampler_LinearClamp, GS_SCREEN_UV(uv + _TaaMotionVectorTex_TexelSize.xy * depthOffsetUv)).xy;
     // NDC to UV: uv = ndc*0.5 + 0.5, but UV y grows up in our splat NDC while texture UV.y grows down, so flip Y.
     half2 vel = half2(mv.x * 0.5, -mv.y * 0.5);
     return vel;
@@ -73,7 +74,7 @@ void AdjustBestDepthOffset(inout half bestDepth, inout half bestX, inout half be
 {
     // Half precision should be fine, as we are only concerned about choosing the better value along sharp edges, so it's
     // acceptable to have banding on continuous surfaces
-    half depth = _CameraDepthTexture.Sample(sampler_PointClamp, uv.xy + _GaussianSplatRT_TexelSize.xy * half2(currX, currY)).r;
+    half depth = _CameraDepthTexture.Sample(sampler_PointClamp, GS_SCREEN_UV(uv.xy + _GaussianSplatRT_TexelSize.xy * half2(currX, currY))).r;
 
 #if UNITY_REVERSED_Z
     depth = 1.0 - depth;
@@ -171,7 +172,7 @@ half4 WorkingSpaceToScene(half4 src)
 
 half4 SampleColorPoint(float2 uv, int2 texelOffset)
 {
-    return _GaussianSplatRT.Sample(sampler_PointClamp, uv, texelOffset);
+    return _GaussianSplatRT.Sample(sampler_PointClamp, GS_SCREEN_UV(uv), texelOffset);
 }
 
 void AdjustColorBox(inout half4 boxMin, inout half4 boxMax, inout half4 moment1, inout half4 moment2, float2 uv, int2 offset)
@@ -197,7 +198,7 @@ half4 ApplyHistoryColorLerp(half4 workingAccumColor, half4 workingCenterColor, f
 // From Filmic SMAA presentation[Jimenez 2016]
 // A bit more verbose that it needs to be, but makes it a bit better at latency hiding
 // (half version based on HDRP impl)
-half4 SampleBicubic5TapHalf(Texture2D sourceTexture, float2 UV, float4 sourceTexture_TexelSize)
+half4 SampleBicubic5TapHalf(GS_SCREEN_TEXTURE sourceTexture, float2 UV, float4 sourceTexture_TexelSize)
 {
     const float2 sourceTextureSize = sourceTexture_TexelSize.zw;
     const float2 sourceTexelSize = sourceTexture_TexelSize.xy;
@@ -220,11 +221,11 @@ half4 SampleBicubic5TapHalf(Texture2D sourceTexture, float2 UV, float4 sourceTex
     float2 tc3 = sourceTexelSize  * (tc1 + 2.0);
     float2 tc12 = sourceTexelSize * (tc1 + w2 / w12);
 
-    half4 s0 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, float2(tc12.x, tc0.y)));
-    half4 s1 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, float2(tc0.x, tc12.y)));
-    half4 s2 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, float2(tc12.x, tc12.y)));
-    half4 s3 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, float2(tc3.x, tc12.y)));
-    half4 s4 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, float2(tc12.x, tc3.y)));
+    half4 s0 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, GS_SCREEN_UV(float2(tc12.x, tc0.y))));
+    half4 s1 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, GS_SCREEN_UV(float2(tc0.x, tc12.y))));
+    half4 s2 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, GS_SCREEN_UV(float2(tc12.x, tc12.y))));
+    half4 s3 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, GS_SCREEN_UV(float2(tc3.x, tc12.y))));
+    half4 s4 = SceneToWorkingSpace(sourceTexture.Sample(sampler_LinearClamp, GS_SCREEN_UV(float2(tc12.x, tc3.y))));
 
     half cw0 = (w12.x * w0.y);
     half cw1 = (w0.x * w12.y);
@@ -285,6 +286,9 @@ half4 ClipToAABBCenter(half4 history, half4 minimum, half4 maximum)
 half4 DoTemporalAA(float2 uv, int clampQuality, int motionQuality, int historyQuality)
 {
     half4 colorCenter = SceneToWorkingSpace(SampleColorPoint(uv, int2(0,0)));
+    // New or invalidated XR histories must never sample undefined contents.
+    if (_TaaFrameInfluence >= 1.0)
+        return WorkingSpaceToScene(colorCenter);
 
     half4 boxMax = colorCenter;
     half4 boxMin = colorCenter;
@@ -344,7 +348,7 @@ half4 DoTemporalAA(float2 uv, int clampQuality, int motionQuality, int historyQu
 
     half4 accumulation = (historyQuality >= 2) ?
         SampleBicubic5TapHalf(_TaaAccumulationTex, historyUv, _TaaAccumulationTex_TexelSize.xyzw) :
-        SceneToWorkingSpace(_TaaAccumulationTex.Sample(sampler_LinearClamp, historyUv));
+        SceneToWorkingSpace(_TaaAccumulationTex.Sample(sampler_LinearClamp, GS_SCREEN_UV(historyUv)));
 
     half4 clampedAccumulation = (clampQuality >= 3) ? ClipToAABBCenter(accumulation, boxMin, boxMax) : clamp(accumulation, boxMin, boxMax);
 

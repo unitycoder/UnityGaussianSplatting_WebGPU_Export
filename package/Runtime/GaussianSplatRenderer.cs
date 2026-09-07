@@ -33,6 +33,7 @@ namespace GaussianSplatting.Runtime
         readonly Dictionary<GaussianSplatRenderer, MaterialPropertyBlock> m_Splats = new();
         readonly HashSet<Camera> m_CameraCommandBuffersDone = new();
         readonly List<(GaussianSplatRenderer, MaterialPropertyBlock)> m_ActiveSplats = new();
+        readonly List<(Matrix4x4 matrix, Material material, int indices, int instances, MaterialPropertyBlock properties)> m_PreparedSplats = new();
 
         CommandBuffer m_CommandBuffer;
         GraphicsBuffer m_CubeIndexBuffer;
@@ -89,6 +90,7 @@ namespace GaussianSplatting.Runtime
             if (!m_Splats.ContainsKey(r))
                 return;
             m_Splats.Remove(r);
+            r.m_XRModelHistory.Clear();
             if (m_Splats.Count == 0)
                 CleanupAfterAllSplatsDeleted();
         }
@@ -117,6 +119,7 @@ namespace GaussianSplatting.Runtime
             }
 
             m_ActiveSplats.Clear();
+            m_PreparedSplats.Clear();
             m_CubeIndexBuffer?.Dispose();
             m_CubeIndexBuffer = null;
             m_CommandBuffer?.Dispose();
@@ -227,6 +230,15 @@ namespace GaussianSplatting.Runtime
         // ReSharper disable once MemberCanBePrivate.Global - used by HDRP/URP features that are not always compiled
         public void RenderAllSplats(Camera cam, CommandBuffer cmb)
         {
+            PrepareSplats(cam, cmb);
+            DrawPreparedSplats(cmb);
+        }
+
+        // Culling, buffer updates and material setup run once for all XR views.
+        internal void PrepareSplats(Camera cam, CommandBuffer cmb, int width = 0, int height = 0, bool stereo = false)
+        {
+            m_PreparedSplats.Clear();
+            cmb.SetGlobalInt("_SplatStereoEnabled", stereo ? 1 : 0);
             EnsureMaterials();
             GaussianSplatSettings settings = GaussianSplatSettings.instance;
             Material displayMat = settings.m_RenderMode switch
@@ -246,6 +258,7 @@ namespace GaussianSplatting.Runtime
             NativeArray<SplatGlobalUniforms> sgu = new(1, Allocator.Temp);
             sgu[0] = new SplatGlobalUniforms { transparencyMode = (uint)settings.m_Transparency, frameOffset = m_FrameOffset, needMotionVectors = (uint)settings.m_TemporalFilter};
             cmb.SetBufferData(m_GlobalUniforms, sgu);
+            sgu.Dispose();
             m_FrameOffset++;
 
             // Bind global constant buffer once per frame instead of per-splat
@@ -254,8 +267,7 @@ namespace GaussianSplatting.Runtime
             // Set global shader properties that are identical for all splats this frame
             // Screen params and camera position are the same for all instances - set them once
             int screenW = cam.pixelWidth, screenH = cam.pixelHeight;
-            int eyeW = XRSettings.eyeTextureWidth, eyeH = XRSettings.eyeTextureHeight;
-            Vector4 screenPar = new Vector4(eyeW != 0 ? eyeW : screenW, eyeH != 0 ? eyeH : screenH, 0, 0);
+            Vector4 screenPar = new Vector4(width > 0 ? width : screenW, height > 0 ? height : screenH, 0, 0);
             Vector4 camPos = cam.transform.position;
             cmb.SetGlobalVector(GaussianSplatRenderer.Props.VecScreenParams, screenPar);
             cmb.SetGlobalVector(GaussianSplatRenderer.Props.VecWorldSpaceCameraPos, camPos);
@@ -317,6 +329,21 @@ namespace GaussianSplatting.Runtime
                 mpb.SetMatrix(GaussianSplatRenderer.Props.PrevMatrixV, prevView);
                 mpb.SetMatrix(GaussianSplatRenderer.Props.MatrixObjectToWorld, matO2W);
                 mpb.SetMatrix(GaussianSplatRenderer.Props.MatrixWorldToObject, matW2O);
+                if (stereo)
+                {
+                    if (!gs.m_XRModelHistory.TryGetValue(cam, out var modelHistory))
+                    {
+                        modelHistory = new GaussianSplatRenderer.XRModelHistory();
+                        gs.m_XRModelHistory.Add(cam, modelHistory);
+                    }
+                    if (modelHistory.frame != Time.frameCount)
+                    {
+                        modelHistory.previous = modelHistory.frame == Time.frameCount - 1 ? modelHistory.current : matrix;
+                        modelHistory.current = matrix;
+                        modelHistory.frame = Time.frameCount;
+                    }
+                    mpb.SetMatrix("_SplatPrevObjectToWorld", modelHistory.previous);
+                }
 
                 // Per-instance properties
                 mpb.SetFloat(GaussianSplatRenderer.Props.SplatScale, gs.m_SplatScale);
@@ -348,19 +375,25 @@ namespace GaussianSplatting.Runtime
                     }
                 }
 
-                MeshTopology topology = MeshTopology.Triangles;
                 if (settings.m_RenderMode is DebugRenderMode.DebugBoxes or DebugRenderMode.DebugChunkBounds)
                     indexCount = 36;
                 if (settings.m_RenderMode == DebugRenderMode.DebugChunkBounds)
                     instanceCount = gs.m_GpuChunksValid ? gs.m_GpuChunks.count : 0;
 
-                cmb.BeginSample(s_ProfDraw);
-                cmb.DrawProcedural(m_CubeIndexBuffer, matrix, displayMat, 0, topology, indexCount, instanceCount, mpb);
-                cmb.EndSample(s_ProfDraw);
+                m_PreparedSplats.Add((matrix, displayMat, indexCount, instanceCount, mpb));
                 
                 // Store current matrix as previous for next frame
                 gs.m_PrevMatrixMV = currentMatMV;
             }
+        }
+
+        internal void DrawPreparedSplats(CommandBuffer cmb)
+        {
+            cmb.BeginSample(s_ProfDraw);
+            foreach (var draw in m_PreparedSplats)
+                cmb.DrawProcedural(m_CubeIndexBuffer, draw.matrix, draw.material, 0,
+                    MeshTopology.Triangles, draw.indices, draw.instances, draw.properties);
+            cmb.EndSample(s_ProfDraw);
         }
 
         // cube indices, most often we use only the first quad
@@ -521,6 +554,12 @@ namespace GaussianSplatting.Runtime
         GaussianSplatAsset m_PrevAsset;
         Hash128 m_PrevHash;
         internal Matrix4x4 m_PrevMatrixMV = Matrix4x4.identity;
+        internal sealed class XRModelHistory
+        {
+            internal int frame = -1;
+            internal Matrix4x4 current, previous;
+        }
+        internal readonly Dictionary<Camera, XRModelHistory> m_XRModelHistory = new();
         bool m_Registered;
 
         // Octree culling system

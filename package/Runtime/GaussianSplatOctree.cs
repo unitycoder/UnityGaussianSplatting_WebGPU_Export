@@ -626,6 +626,26 @@ namespace GaussianSplatting.Runtime
         /// Perform frustum culling and update visible splat indices.
         /// Returns number of visible splats.
         /// </summary>
+        Plane[] m_RightEyeFrustum;
+        Plane[] PrepareCameraFrustum(Camera camera)
+        {
+            m_RightEyeFrustum = null;
+            if (!camera.stereoEnabled)
+                return GeometryUtility.CalculateFrustumPlanes(camera);
+            m_RightEyeFrustum = GeometryUtility.CalculateFrustumPlanes(
+                camera.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right) *
+                camera.GetStereoViewMatrix(Camera.StereoscopicEye.Right));
+            return GeometryUtility.CalculateFrustumPlanes(
+                camera.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left) *
+                camera.GetStereoViewMatrix(Camera.StereoscopicEye.Left));
+        }
+
+        bool IsVisibleInEitherEye(Plane[] left, Bounds bounds)
+        {
+            return GeometryUtility.TestPlanesAABB(left, bounds) ||
+                (m_RightEyeFrustum != null && GeometryUtility.TestPlanesAABB(m_RightEyeFrustum, bounds));
+        }
+
         public int CullFrustum(Camera camera)
         {
             if (!m_Built)
@@ -641,7 +661,7 @@ namespace GaussianSplatting.Runtime
             }
 
             // Extract frustum planes from camera
-            var frustumPlanes = GeometryUtility.CalculateFrustumPlanes(camera);
+            var frustumPlanes = PrepareCameraFrustum(camera);
 
             // Traverse octree and collect visible splats
             int currentIndex = 0;
@@ -684,7 +704,7 @@ namespace GaussianSplatting.Runtime
             var node = m_Nodes[nodeIndex];
 
             // Test node bounds against frustum
-            if (!GeometryUtility.TestPlanesAABB(frustumPlanes, node.bounds))
+            if (!IsVisibleInEitherEye(frustumPlanes, node.bounds))
                 return; // Node is outside frustum
 
             if (node.isLeaf)
@@ -937,7 +957,7 @@ namespace GaussianSplatting.Runtime
             }
             
             m_VisibleNodeRefs.Clear();
-            var frustumPlanes = GeometryUtility.CalculateFrustumPlanes(camera);
+            var frustumPlanes = PrepareCameraFrustum(camera);
             CollectVisibleNodesWithDistance(0, frustumPlanes, camPosition);
 
             if (enableParallelSorting)
@@ -1651,7 +1671,7 @@ namespace GaussianSplatting.Runtime
                 var node = m_Nodes[currentNodeIndex];
                 
                 // Frustum culling - early exit if node not visible
-                if (!GeometryUtility.TestPlanesAABB(frustumPlanes, node.bounds))
+                if (!IsVisibleInEitherEye(frustumPlanes, node.bounds))
                     continue;
                 
                 if (node.isLeaf)

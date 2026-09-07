@@ -20,10 +20,12 @@ Shader "Gaussian Splatting/Render Splats"
 CGPROGRAM
 #pragma vertex vert
 #pragma fragment frag
+#pragma target 4.5
 // Remove compute shader requirement for WebGL compatibility
 // #pragma require compute
 
 #include "GaussianSplatting.hlsl"
+#include "GaussianStereo.hlsl"
 
 float _SplatScale;
 float _SplatOpacityScale;
@@ -69,8 +71,9 @@ void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
     float radius = length(float2((diag1 - diag2) / 2.0, offDiag));
     float lambda1 = mid + radius;
     float lambda2 = max(mid - radius, 0.1);
-    float2 diagVec = normalize(float2(offDiag, lambda1 - diag1));
-    diagVec.y = -diagVec.y;
+    float2 eigenvector = float2(offDiag, lambda1 - diag1);
+    float2 diagVec = dot(eigenvector, eigenvector) > 1e-12 ? normalize(eigenvector) : float2(1, 0);
+    if (!_SplatStereoEnabled) diagVec.y = -diagVec.y;
     float maxSize = 4096.0;
     v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
     v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
@@ -79,6 +82,18 @@ void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
 v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
     v2f o = (v2f)0;
+    uint eye = SplatEyeIndex();
+    float4x4 projection = UNITY_MATRIX_P;
+    float4x4 mv = _MatrixMV;
+    float4x4 prevProjection = UNITY_MATRIX_P;
+    float4x4 prevMV = _PrevMatrixMV;
+    if (_SplatStereoEnabled)
+    {
+        projection = _SplatProjection[eye];
+        mv = mul(_SplatView[eye], _MatrixObjectToWorld);
+        prevProjection = _SplatPrevProjection[eye];
+        prevMV = mul(_SplatPrevView[eye], _SplatPrevObjectToWorld);
+    }
     uint realIdx = instID;
     if (_UseIndexMapping)
         realIdx = _SplatIndexMap[instID];
@@ -88,7 +103,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     
     // Transform to world space
     float3 centerWorldPos = mul(_MatrixObjectToWorld, float4(splat.pos, 1)).xyz;
-    float4 centerClipPos = mul(UNITY_MATRIX_VP, float4(centerWorldPos, 1));
+    float4 centerClipPos = SplatWorldToClip(centerWorldPos);
     
     // Check if behind camera, outside relaxed frustum, or outside near/far clip planes
     bool behindCam = centerClipPos.w <= 0;
@@ -112,7 +127,11 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     
     // Project 3D covariance to 2D screen space
     float2 screenCenter2D;
-    float3 cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _MatrixMV, UNITY_MATRIX_P, _VecScreenParams, screenCenter2D);
+    float3 cov2d;
+    if (_SplatStereoEnabled)
+        cov2d = CalcStereoCovariance2D(splat.pos, cov3d0, cov3d1, mv, projection, _VecScreenParams, screenCenter2D);
+    else
+        cov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, mv, projection, _VecScreenParams, screenCenter2D);
     
     // Update clip position with corrected screen center
     float4 centerClipPosCorrected = centerClipPos;
@@ -132,6 +151,12 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     
     // Calculate color using spherical harmonics
     float3 worldViewDir = _VecWorldSpaceCameraPos.xyz - centerWorldPos;
+    if (_SplatStereoEnabled)
+    {
+        float4x4 view = _SplatView[eye];
+        float3 eyeWorldPos = mul(transpose((float3x3)view), -float3(view._m03, view._m13, view._m23));
+        worldViewDir = eyeWorldPos - centerWorldPos;
+    }
     float3 objViewDir = mul((float3x3)_MatrixWorldToObject, worldViewDir);
     objViewDir = normalize(objViewDir);
     half3 col = ShadeSH(splat.sh, objViewDir, _SHOrder, _SHOnly != 0);
@@ -146,7 +171,8 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
     o.pos = quadPos;
     
     // Apply screen-space offset
-    float2 deltaScreenPos = (quadPos.x * axis1 + quadPos.y * axis2) * 2 / _ScreenParams.xy;
+    float2 pixelSize = _SplatStereoEnabled ? _VecScreenParams.xy : _ScreenParams.xy;
+    float2 deltaScreenPos = (quadPos.x * axis1 + quadPos.y * axis2) * 2 / pixelSize;
     o.vertex = centerClipPosCorrected;
     o.vertex.xy += deltaScreenPos * centerClipPosCorrected.w;
 
@@ -166,12 +192,14 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
         { 
             // Previous center clip position: project world center with previous view and current projection
             float4 prevCenterClipPos = mul(UNITY_MATRIX_P, mul(_PrevMatrixV, float4(centerWorldPos, 1)));
+            if (_SplatStereoEnabled)
+                prevCenterClipPos = mul(prevProjection, mul(prevMV, float4(splat.pos, 1)));
 
             // Previous center NDC
             float2 prevCenterNDC = prevCenterClipPos.xy / prevCenterClipPos.w;
             // Motion vector is center NDC difference (approximation, avoids per-vertex offsets)
             o.vel = currentCenterNDC - prevCenterNDC;
-            FlipMotionIfBackbuffer(o.vel);
+            if (!_SplatStereoEnabled) FlipMotionIfBackbuffer(o.vel);
         }
     }
     else if (sgu_needMotionVectors == 2)
@@ -188,7 +216,11 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
             // Calculate previous position for motion vectors
             // Project 3D covariance to 2D screen space using previous matrix
             float2 prevScreenCenter2D;
-            float3 prevCov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, _PrevMatrixMV, UNITY_MATRIX_P, _VecScreenParams, prevScreenCenter2D);
+            float3 prevCov2d;
+            if (_SplatStereoEnabled)
+                prevCov2d = CalcStereoCovariance2D(splat.pos, cov3d0, cov3d1, prevMV, prevProjection, _VecScreenParams, prevScreenCenter2D);
+            else
+                prevCov2d = CalcCovariance2D(splat.pos, cov3d0, cov3d1, prevMV, prevProjection, _VecScreenParams, prevScreenCenter2D);
 
             // Decompose previous 2D covariance into screen-space axes
             float2 prevAxis1, prevAxis2;
@@ -199,14 +231,14 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
             prevCenterClipPos.xy = (prevScreenCenter2D * 2/_VecScreenParams.xy - 1) * centerClipPos.w;
 
             // Apply same quad offset to get previous vertex position
-            float2 prevDeltaScreenPos = (quadPos.x * prevAxis1 + quadPos.y * prevAxis2) * 2 / _ScreenParams.xy;
+            float2 prevDeltaScreenPos = (quadPos.x * prevAxis1 + quadPos.y * prevAxis2) * 2 / pixelSize;
             float4 prevVertex = prevCenterClipPos;
             prevVertex.xy += prevDeltaScreenPos * centerClipPos.w;
 
             // Calculate previous NDC position
             float2 prevNDC = (prevVertex.xy / prevVertex.w);
             o.vel = currentNDC - prevNDC;
-            FlipMotionIfBackbuffer(o.vel);
+            if (!_SplatStereoEnabled) FlipMotionIfBackbuffer(o.vel);
         }
     }
     else
@@ -214,7 +246,7 @@ v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
         o.vel = float2(0.0, 0.0);
     }
 
-	FlipProjectionIfBackbuffer(o.vertex);
+	if (!_SplatStereoEnabled) FlipProjectionIfBackbuffer(o.vertex);
     return o;
 }
 
