@@ -420,10 +420,37 @@ namespace GaussianSplatting.Editor
             order.Schedule(splatData.Length, 4096).Complete();
             order.m_Order.Sort(new OrderComparer());
 
-            NativeArray<InputSplatData> copy = new(order.m_SplatData, Allocator.TempJob);
-            for (int i = 0; i < copy.Length; ++i)
-                order.m_SplatData[i] = copy[order.m_Order[i].Item2];
-            copy.Dispose();
+            // Reorder in-place to avoid duplicating the full splat array (can exceed 2GB on large inputs).
+            NativeArray<byte> visited = new NativeArray<byte>(order.m_SplatData.Length, Allocator.TempJob, NativeArrayOptions.ClearMemory);
+            for (int i = 0; i < order.m_SplatData.Length; ++i)
+            {
+                if (visited[i] != 0)
+                    continue;
+
+                int src = order.m_Order[i].Item2;
+                if (src == i)
+                {
+                    visited[i] = 1;
+                    continue;
+                }
+
+                InputSplatData temp = order.m_SplatData[i];
+                int dst = i;
+                while (true)
+                {
+                    visited[dst] = 1;
+                    int nextSrc = order.m_Order[dst].Item2;
+                    if (nextSrc == i)
+                    {
+                        order.m_SplatData[dst] = temp;
+                        break;
+                    }
+
+                    order.m_SplatData[dst] = order.m_SplatData[nextSrc];
+                    dst = nextSrc;
+                }
+            }
+            visited.Dispose();
 
             order.m_Order.Dispose();
         }

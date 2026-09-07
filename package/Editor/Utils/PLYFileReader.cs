@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 
 namespace GaussianSplatting.Editor.Utils
 {
@@ -24,10 +25,6 @@ namespace GaussianSplatting.Editor.Utils
 
         static void ReadHeaderImpl(string filePath, out int vertexCount, out int vertexStride, out List<(string, ElementType)> attrs, FileStream fs)
         {
-            // C# arrays and NativeArrays make it hard to have a "byte" array larger than 2GB :/
-            if (fs.Length >= 2 * 1024 * 1024 * 1024L)
-                throw new IOException($"PLY {filePath} read error: currently files larger than 2GB are not supported");
-
             // read header
             vertexCount = 0;
             vertexStride = 0;
@@ -69,10 +66,92 @@ namespace GaussianSplatting.Editor.Utils
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
             ReadHeaderImpl(filePath, out vertexCount, out vertexStride, out attrs, fs);
 
-            vertices = new NativeArray<byte>(vertexCount * vertexStride, Allocator.Persistent);
+            long dataBytes = (long)vertexCount * vertexStride;
+            if (dataBytes > int.MaxValue)
+                throw new IOException($"PLY {filePath} vertex payload is too large for raw byte buffer ({dataBytes} bytes). Use streaming conversion path.");
+
+            vertices = new NativeArray<byte>((int)dataBytes, Allocator.Persistent);
             var readBytes = fs.Read(vertices);
             if (readBytes != vertices.Length)
                 throw new IOException($"PLY {filePath} read error, expected {vertices.Length} data bytes got {readBytes}");
+        }
+
+        public static unsafe NativeArray<InputSplatData> ReadFileAsSplats(string filePath, out int vertexCount, out int vertexStride, out List<(string, ElementType)> attrs)
+        {
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+            ReadHeaderImpl(filePath, out vertexCount, out vertexStride, out attrs, fs);
+
+            string[] splatAttributes =
+            {
+                "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2",
+                "f_rest_0", "f_rest_1", "f_rest_2", "f_rest_3", "f_rest_4", "f_rest_5", "f_rest_6", "f_rest_7", "f_rest_8", "f_rest_9",
+                "f_rest_10", "f_rest_11", "f_rest_12", "f_rest_13", "f_rest_14", "f_rest_15", "f_rest_16", "f_rest_17", "f_rest_18", "f_rest_19",
+                "f_rest_20", "f_rest_21", "f_rest_22", "f_rest_23", "f_rest_24", "f_rest_25", "f_rest_26", "f_rest_27", "f_rest_28", "f_rest_29",
+                "f_rest_30", "f_rest_31", "f_rest_32", "f_rest_33", "f_rest_34", "f_rest_35", "f_rest_36", "f_rest_37", "f_rest_38", "f_rest_39",
+                "f_rest_40", "f_rest_41", "f_rest_42", "f_rest_43", "f_rest_44", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"
+            };
+
+            int[] fileAttrOffsets = new int[attrs.Count];
+            int runningOffset = 0;
+            for (int i = 0; i < attrs.Count; ++i)
+            {
+                fileAttrOffsets[i] = runningOffset;
+                runningOffset += TypeToSize(attrs[i].Item2);
+            }
+
+            int[] srcOffsets = new int[splatAttributes.Length];
+            for (int i = 0; i < splatAttributes.Length; ++i)
+            {
+                int attrIndex = attrs.IndexOf((splatAttributes[i], ElementType.Float));
+                srcOffsets[i] = attrIndex >= 0 ? fileAttrOffsets[attrIndex] : -1;
+            }
+
+            int dstStride = UnsafeUtility.SizeOf<InputSplatData>();
+            var splats = new NativeArray<InputSplatData>(vertexCount, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+            byte* dstBase = (byte*)splats.GetUnsafePtr();
+
+            const int kChunkVertices = 8192;
+            int chunkBytes = vertexStride * kChunkVertices;
+            byte[] chunk = new byte[chunkBytes];
+
+            int written = 0;
+            while (written < vertexCount)
+            {
+                int vertsThisChunk = Math.Min(kChunkVertices, vertexCount - written);
+                int bytesToRead = vertsThisChunk * vertexStride;
+                ReadExact(fs, chunk, bytesToRead);
+
+                fixed (byte* chunkPtr = chunk)
+                {
+                    for (int vi = 0; vi < vertsThisChunk; ++vi)
+                    {
+                        byte* srcVertex = chunkPtr + vi * vertexStride;
+                        byte* dstVertex = dstBase + (written + vi) * dstStride;
+                        for (int attr = 0; attr < srcOffsets.Length; ++attr)
+                        {
+                            int srcOffset = srcOffsets[attr];
+                            if (srcOffset >= 0)
+                                *(int*)(dstVertex + attr * 4) = *(int*)(srcVertex + srcOffset);
+                        }
+                    }
+                }
+
+                written += vertsThisChunk;
+            }
+
+            return splats;
+        }
+
+        static void ReadExact(FileStream fs, byte[] buffer, int byteCount)
+        {
+            int offset = 0;
+            while (offset < byteCount)
+            {
+                int read = fs.Read(buffer, offset, byteCount - offset);
+                if (read <= 0)
+                    throw new IOException($"PLY read error, expected {byteCount} bytes, got {offset}");
+                offset += read;
+            }
         }
 
         public enum ElementType

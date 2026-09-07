@@ -46,14 +46,12 @@ namespace GaussianSplatting.Editor.Utils
         {
             if (isPLY(filePath))
             {
-                NativeArray<byte> plyRawData;
                 List<(string, PLYFileReader.ElementType)> attributes;
-                PLYFileReader.ReadFile(filePath, out var splatCount, out var vertexStride, out attributes, out plyRawData);
+                splats = PLYFileReader.ReadFileAsSplats(filePath, out var splatCount, out var vertexStride, out attributes);
                 string attrError = CheckPLYAttributes(attributes);
                 if (!string.IsNullOrEmpty(attrError))
                     throw new IOException($"PLY file is probably not a Gaussian Splat file? Missing properties: {attrError}");
-                splats = PLYDataToSplats(plyRawData, splatCount, vertexStride, attributes);
-                
+
                 int shCount = 15;   //default 15
                 // Count how many f_rest_* attributes are present
                 int restCount = attributes.Count(a => a.Item1.StartsWith("f_rest_") && a.Item2 == PLYFileReader.ElementType.Float);
